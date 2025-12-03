@@ -1,0 +1,175 @@
+import pandas as pd
+import numpy as np
+from catboost import CatBoostClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.utils import resample
+
+# ==============================================================================
+# 1. CONFIGURATION FINALE (TOP 50 FEATURES)
+# ==============================================================================
+FINAL_SELECTED_FEATURES = [
+    'Popo_1km', 'Population', 'LONGITUDE', 'Ecoregion_NA_L2CODE', 'EVC', 'EVH', 
+    'rpms_1km', 'FOD_ID', 'GHM', 'Wind_x_Dryness', 'EBLR_PFS', 'Discovery_Time_Hours', 
+    'Land_Cover', 'EALR_PFS', 'Annual_etr', 'GDP', 'EVT', 'LATITUDE', 'EPL_MOBILE', 
+    'Ecoregion_US_L3CODE', 'NDVI-1day', 'No_FireStation_20.0km', 'NWCG_GENERAL_CAUSE_Recreation and ceremony', 
+    'TRACT', 'NWCG_CAUSE_CLASSIFICATION_Human', 'EPL_AGE17', 'sph_Normal', 'vs', 
+    'PM25F_PFS', 'Annual_tempreture', 'OWNER_DESCR_PRIVATE', 'EPLR_PFS', 'fm1000', 
+    'rmin_5D_min', 'Wind_x_Potential', 'NPL_PFS', 'No_FireStation_5.0km', 'SDI', 
+    'GACC_New fire', 'Slope_x_Wind', 'GAP_Sts', 'Elevation_1km', 'LMI_PFS', 'rmax_Normal', 
+    'DISCOVERY_DOY', 'MHVF_PFS', 'rmin', 'NWCG_GENERAL_CAUSE_Arson/incendiarism', 
+    'Annual_precipitation', 'rmin_5D_mean'
+]
+
+# Import du nettoyage
+try:
+    from without_one_hot_encoding import full_data_cleaning_pipeline
+except ImportError:
+    print("ERREUR : 'cleaning_without_one_hot_encoding.py' introuvable.")
+    exit()
+
+# ==============================================================================
+# 2. PRÉPARATION DES DONNÉES ET FILTRATION
+# ==============================================================================
+def prepare_data_final():
+    print("--- 1. CHARGEMENT, NETTOYAGE ET FILTRATION (TOP 50) ---")
+    filename = "2020_FPA_FOD_cons.csv"
+    try:
+        df = pd.read_csv(filename)
+    except FileNotFoundError:
+        print(f"ERREUR : '{filename}' introuvable.")
+        exit()
+
+    # Nettoyage pipeline complet (prépare toutes les colonnes)
+    df_final = full_data_cleaning_pipeline(df)
+
+    # Gestion de la Cible (A/B -> 0 Petit, C -> 1 Moyen, D-G -> 2 Grand)
+    mapping = {'A': 0, 'B': 0, 'C': 1, 'D': 2, 'E': 2, 'F': 2, 'G': 2}
+    if 'FIRE_SIZE_CLASS' in df_final.columns:
+        df_final = df_final.dropna(subset=['FIRE_SIZE_CLASS'])
+        sample_val = df_final['FIRE_SIZE_CLASS'].iloc[0]
+        if isinstance(sample_val, str) and sample_val in mapping:
+             df_final['FIRE_SIZE_CLASS'] = df_final['FIRE_SIZE_CLASS'].map(mapping)
+        df_final['FIRE_SIZE_CLASS'] = df_final['FIRE_SIZE_CLASS'].astype(int)
+
+    # CORRECTION CRITIQUE (Fuite de données) : On retire la taille et la classe
+    cols_to_drop_leakage = ['FIRE_SIZE_CLASS', 'FIRE_SIZE']
+    df_features = df_final.drop(columns=[c for c in cols_to_drop_leakage if c in df_final.columns], errors='ignore')
+    y = df_final['FIRE_SIZE_CLASS']
+
+    # FILTRATION : On ne garde que les 50 features optimales
+    X = df_features[FINAL_SELECTED_FEATURES].copy()
+    
+    # Détection des catégories (Seulement celles qui sont dans notre TOP 50)
+    cat_features_indices = np.where(
+        (X.dtypes == 'object') | (X.dtypes == 'category')
+    )[0]
+    cat_features_names = X.columns[cat_features_indices].tolist()
+    
+    print(f"-> Nombre final de features utilisées : {X.shape[1]}")
+    
+    return X, y, cat_features_names
+
+# ==============================================================================
+# 3. ENTRAÎNEMENT DU MODÈLE FINAL
+# ==============================================================================
+X, y, final_cat_features = prepare_data_final()
+
+# Split Train/Test
+X_train_raw, X_test, y_train_raw, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# Équilibrage sur le jeu d'entraînement (4:2:1)
+train_data = pd.concat([X_train_raw, y_train_raw], axis=1)
+df_0 = train_data[train_data.FIRE_SIZE_CLASS == 0]
+df_1 = train_data[train_data.FIRE_SIZE_CLASS == 1]
+df_2 = train_data[train_data.FIRE_SIZE_CLASS == 2]
+
+n_minority = len(df_2)
+df_0_down = resample(df_0, replace=False, n_samples=min(len(df_0), n_minority * 4), random_state=42)
+df_1_down = resample(df_1, replace=False, n_samples=min(len(df_1), n_minority * 2), random_state=42)
+df_train_balanced = pd.concat([df_0_down, df_1_down, df_2]).sample(frac=1, random_state=42)
+
+X_train = df_train_balanced.drop(columns=['FIRE_SIZE_CLASS'])
+y_train = df_train_balanced['FIRE_SIZE_CLASS']
+
+print("\n--- 2. ENTRAÎNEMENT CATBOOST FINAL (TOP 50) ---")
+
+# Entraînement Final (1000 itérations)
+model_final = CatBoostClassifier(
+    iterations=1000, 
+    learning_rate=0.05,
+    depth=6,
+    loss_function='MultiClass',
+    cat_features=final_cat_features, 
+    verbose=100, # Affiche la progression
+    random_seed=42,
+    allow_writing_files=False
+)
+
+model_final.fit(X_train, y_train)
+print("-> Modèle Final (Top 50) entraîné.")
+
+# ==============================================================================
+# 4. PRÉDICTION DES PROBABILITÉS (RISK SCORING)
+# ==============================================================================
+
+# Calcul des probabilités pour l'ensemble de test
+probas = model_final.predict_proba(X_test) # Donne un tableau N_lignes x 3 classes
+
+# DataFrame de résultats pour l'affichage
+results = X_test.copy()
+results['Vrai_Classe'] = y_test
+results['Prob_Petit_Feu (%)'] = (probas[:, 0] * 100).round(1) # Classe 0
+results['Prob_Moyen_Feu (%)'] = (probas[:, 1] * 100).round(1) # Classe 1
+results['Prob_Grand_Feu (%)'] = (probas[:, 2] * 100).round(1) # Classe 2
+
+# --- AJOUT DE L'ANALYSE DE FIABILITÉ (PAR TRANCHE DE RISQUE) ---
+
+# On prend le score de risque "Grand Feu" (probas[:, 2])
+risk_scores = probas[:, 2] 
+
+# Définition des tranches de 20%
+bins = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+labels = ['0-20%', '20-40%', '40-60%', '60-80%', '80-100%']
+results['Tranche_Risque'] = pd.cut(risk_scores, bins=bins, labels=labels, include_lowest=True)
+
+# On calcule quel pourcentage de feux étaient VRAIMENT grands dans chaque tranche
+stats = results.groupby('Tranche_Risque', observed=False)['Vrai_Classe'].apply(lambda x: (x==2).mean() * 100)
+counts = results['Tranche_Risque'].value_counts(sort=False)
+
+# Affichage de l'analyse
+print("\n--- FIABILITÉ DES PROBABILITÉS (Grand Feu) ---")
+print(f"{'Tranche de Risque':<20} | {'Nb Feux':<10} | {'% Réel de Grands Feux'}")
+print("-" * 65)
+
+for label in labels:
+    if label in stats.index:
+        val_reelle = stats[label]
+        print(f"{label:<20} | {counts[label]:<10} | {val_reelle:.1f}%")
+print("-" * 65)
+
+auc = roc_auc_score((y_test == 2).astype(int), probas[:, 2])
+
+print("\n" + "="*80)
+print(f" RÉSULTATS DU MODÈLE FINAL (TOP 50 FEATURES)")
+print("==============================================")
+print(f"SCORE FINAL (AUC) : {auc:.4f} / 1.000")
+print("-" * 80)
+
+print("\nTOP 10 DES PRÉDICTIONS DÉTAILLÉES :")
+# Affichage des feux les plus risqués (par Prob_Grand_Feu)
+top_predictions = results.sort_values(by='Prob_Grand_Feu (%)', ascending=False).head(10)
+
+print(f"{'VRAIE CLASSE':<15} | {'Petit Feu (%)':<15} | {'Moyen Feu (%)':<15} | {'Grand Feu (%)'}")
+print("-" * 75)
+
+for index, row in top_predictions.iterrows():
+    vrai_classe = row['Vrai_Classe']
+    label = "GRAND [!!!]" if vrai_classe == 2 else ("MOYEN" if vrai_classe == 1 else "PETIT")
+
+    print(f"{label:<15} | {row['Prob_Petit_Feu (%)']:<15} | {row['Prob_Moyen_Feu (%)']:<15} | {row['Prob_Grand_Feu (%)']}")
+
+print("-" * 75)
+print("\nLe modèle final utilise les 50 meilleures variables pour prédire la probabilité de chaque classe de feu.")
