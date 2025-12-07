@@ -3,7 +3,7 @@ import numpy as np
 import xgboost as xgb
 import re
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
+from sklearn.metrics import roc_auc_score
 from sklearn.utils import resample
 
 # Import du nettoyage
@@ -35,7 +35,7 @@ SELECTED_FEATURES = [
 ]
 
 # ==============================================================================
-# 2. PRÉPARATION (Identique)
+# 2. PRÉPARATION
 # ==============================================================================
 def prepare_data():
     print("--- 1. CHARGEMENT ET NETTOYAGE ---")
@@ -74,7 +74,7 @@ print("--- 2. ENTRAÎNEMENT DU MODÈLE DE RISQUE ---")
 # Split
 X_train_raw, X_test, y_train_raw, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-# Équilibrage (4:2:1) pour bien apprendre les dangers
+# Équilibrage (4:2:1)
 train_data = pd.concat([X_train_raw, y_train_raw], axis=1)
 df_0 = train_data[train_data.FIRE_SIZE_CLASS == 0]
 df_1 = train_data[train_data.FIRE_SIZE_CLASS == 1]
@@ -104,40 +104,33 @@ model.fit(X_train, y_train)
 print("-> Modèle entraîné avec succès.")
 
 # ==============================================================================
-# 4. DÉTECTION ET SCORING (Le Cœur du sujet)
+# 4. DÉTECTION ET SCORING
 # ==============================================================================
 print("\n" + "="*80)
 print(" RÉSULTATS DE LA DÉTECTION DE RISQUE (GRANDS FEUX)")
 print("="*80)
 
-# 1. On récupère les probabilités (N_lignes x 3 classes)
 probas = model.predict_proba(X_test)
-
-# 2. On s'intéresse uniquement à la colonne 2 (Probabilité d'être un Grand Feu)
 risk_scores = probas[:, 2] 
 
-# Création d'un DataFrame de résultats pour analyse
 results = X_test.copy()
 results['Vrai_Classe'] = y_test
-results['Score_Risque_GrandFeu'] = risk_scores # C'est le % de chance (0.0 à 1.0)
+results['Score_Risque_GrandFeu'] = risk_scores 
 results['Score_Risque_Percent'] = (results['Score_Risque_GrandFeu'] * 100).round(1)
 
 # ==============================================================================
 # 5. AFFICHAGE DES RÉSULTATS CLÉS
 # ==============================================================================
 
-# A. Score Global du Modèle (AUC)
-# L'AUC (Area Under Curve) mesure si le modèle met bien les grands feux "en haut" de la liste.
-# 0.5 = Hasard, 1.0 = Parfait.
-y_test_binary = (y_test == 2).astype(int) # On transforme en problème binaire (Grand vs Reste)
+# A. Score Global (AUC)
+y_test_binary = (y_test == 2).astype(int) 
 auc = roc_auc_score(y_test_binary, risk_scores)
 
 print(f"SCORE DE PERFORMANCE GLOBAL (AUC) : {auc:.3f} / 1.000")
 print(f"(Interprétation : Capacité du modèle à classer un Grand Feu plus risqué qu'un Petit Feu)")
 print("-" * 80)
 
-# B. Simulation : "Top Alertes"
-# Imaginons qu'on reçoit ces feux en temps réel. On affiche ceux qui ont le plus gros score.
+# B. Top Alertes
 top_alerts = results.sort_values(by='Score_Risque_GrandFeu', ascending=False).head(15)
 
 print("TOP 15 DES ALERTES DÉTECTÉES (Les feux les plus risqués selon le modèle) :")
@@ -146,34 +139,27 @@ print("-" * 80)
 
 for index, row in top_alerts.iterrows():
     risk = row['Score_Risque_Percent']
-    
-    # Traduction classe
     classe_reelle = row['Vrai_Classe']
     label_classe = "PETIT (0)"
     if classe_reelle == 1: label_classe = "MOYEN (1)"
     if classe_reelle == 2: label_classe = "GRAND (2) [DANGER]"
     
-    # On cherche l'état (One-hot decoding rapide pour l'affichage)
     state = "Unknown"
     for col in SELECTED_FEATURES:
         if col.startswith('STATE_') and row[col] == 1:
             state = col.replace('STATE_', '')
             break
-            
     pop = row['Population']
-    
     print(f"{risk}%       | {label_classe:<15} | {state:<20} | {pop:.0f}")
 
 print("-" * 80)
 
-# C. Analyse par tranche de probabilité
-# Pour vérifier si le % est fiable.
+# C. Fiabilité
 print("\nFIABILITÉ DES PROBABILITÉS :")
 bins = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
 labels = ['0-20%', '20-40%', '40-60%', '60-80%', '80-100%']
 results['Tranche_Risque'] = pd.cut(results['Score_Risque_GrandFeu'], bins=bins, labels=labels)
 
-# On calcule quel % de feux étaient VRAIMENT grands dans chaque tranche
 stats = results.groupby('Tranche_Risque', observed=False)['Vrai_Classe'].apply(lambda x: (x==2).mean() * 100)
 counts = results['Tranche_Risque'].value_counts(sort=False)
 
@@ -182,4 +168,26 @@ for label in labels:
     if label in stats.index:
         print(f"{label:<20} | {counts[label]:<10} | {stats[label]:.1f}%")
 
-print("\n(Si le modèle est bon, le '% Réel' doit augmenter avec la 'Tranche de Risque')")
+# --- PARTIE AJOUTÉE : ANALYSE DE RISQUE (SEUIL 50%) ---
+print("\n" + "="*90)
+print(" ANALYSE DE RISQUE : PROBABILITÉ D'ÊTRE UN GRAND FEU > 50%")
+print("="*90)
+
+# 1. Pour les PETITS feux (Vrai_Classe == 0)
+subset_petit = results[results['Vrai_Classe'] == 0]
+nb_petit_alert = (subset_petit['Score_Risque_GrandFeu'] > 0.5).sum()
+pct_petit_alert = (nb_petit_alert / len(subset_petit)) * 100 if len(subset_petit) > 0 else 0
+print(f"Petits Feux avec > 50% de risque Grand Feu : {pct_petit_alert:6.2f}%  ({nb_petit_alert}/{len(subset_petit)})")
+
+# 2. Pour les MOYENS feux (Vrai_Classe == 1)
+subset_moyen = results[results['Vrai_Classe'] == 1]
+nb_moyen_alert = (subset_moyen['Score_Risque_GrandFeu'] > 0.5).sum()
+pct_moyen_alert = (nb_moyen_alert / len(subset_moyen)) * 100 if len(subset_moyen) > 0 else 0
+print(f"Moyens Feux avec > 50% de risque Grand Feu : {pct_moyen_alert:6.2f}%  ({nb_moyen_alert}/{len(subset_moyen)})")
+
+# 3. Pour les GRANDS feux (Vrai_Classe == 2) - C'est le Recall au seuil 0.5
+subset_grand = results[results['Vrai_Classe'] == 2]
+nb_grand_alert = (subset_grand['Score_Risque_GrandFeu'] > 0.5).sum()
+pct_grand_alert = (nb_grand_alert / len(subset_grand)) * 100 if len(subset_grand) > 0 else 0
+print(f"Grands Feux avec > 50% de risque Grand Feu : {pct_grand_alert:6.2f}%  ({nb_grand_alert}/{len(subset_grand)})")
+print("-" * 90)

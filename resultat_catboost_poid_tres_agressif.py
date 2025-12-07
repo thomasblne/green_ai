@@ -180,3 +180,27 @@ if __name__ == "__main__":
     print_calibration_table(results, 0, "Petit Feu")
     print_calibration_table(results, 1, "Moyen Feu")
     print_calibration_table(results, 2, "Grand Feu")
+
+    # --- PARTIE C : ANALYSE DE RISQUE (SEUIL 50% GRAND FEU) ---
+    print("\n" + "="*90)
+    print(" ANALYSE DE RISQUE : PROBABILITÉ D'ÊTRE UN GRAND FEU > 50%")
+    print("="*90)
+
+    # 1. Pour les PETITS feux (True_Class == 0)
+    subset_petit = results[results['True_Class'] == 0]
+    nb_petit_alert = (subset_petit['Prob_Class_2'] > 0.5).sum()
+    pct_petit_alert = (nb_petit_alert / len(subset_petit)) * 100 if len(subset_petit) > 0 else 0
+    print(f"Petits Feux avec > 50% de risque Grand Feu : {pct_petit_alert:6.2f}%  ({nb_petit_alert}/{len(subset_petit)})")
+
+    # 2. Pour les MOYENS feux (True_Class == 1)
+    subset_moyen = results[results['True_Class'] == 1]
+    nb_moyen_alert = (subset_moyen['Prob_Class_2'] > 0.5).sum()
+    pct_moyen_alert = (nb_moyen_alert / len(subset_moyen)) * 100 if len(subset_moyen) > 0 else 0
+    print(f"Moyens Feux avec > 50% de risque Grand Feu : {pct_moyen_alert:6.2f}%  ({nb_moyen_alert}/{len(subset_moyen)})")
+
+    # 3. Pour les GRANDS feux (True_Class == 2) - C'est le Recall au seuil 0.5
+    subset_grand = results[results['True_Class'] == 2]
+    nb_grand_alert = (subset_grand['Prob_Class_2'] > 0.5).sum()
+    pct_grand_alert = (nb_grand_alert / len(subset_grand)) * 100 if len(subset_grand) > 0 else 0
+    print(f"Grands Feux avec > 50% de risque Grand Feu : {pct_grand_alert:6.2f}%  ({nb_grand_alert}/{len(subset_grand)})")
+    print("-" * 90)
